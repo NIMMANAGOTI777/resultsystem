@@ -62,14 +62,13 @@ function App() {
     loadSchoolAndUser();
   }, []);
 
-  // Update URL state or view direct results if params are present
+  // Guard protected admin views
   useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const hasParams = params.has('roll') && params.has('dob');
-    if (hasParams && activeView !== 'public-portal') {
-      setActiveView('public-portal');
+    const isPublic = ['public-portal', 'login'].includes(activeView);
+    if (!isPublic && !currentUser) {
+      setActiveView('login');
     }
-  }, [activeView]);
+  }, [activeView, currentUser]);
 
   const handleLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -100,7 +99,12 @@ function App() {
   };
 
   const navigateTo = (view: ActiveView) => {
-    setActiveView(view);
+    const isPublic = ['public-portal', 'login'].includes(view);
+    if (!isPublic && !currentUser) {
+      setActiveView('login');
+    } else {
+      setActiveView(view);
+    }
   };
 
   // Nav link item configuration

@@ -47,6 +47,21 @@ export const ExcelUpload: React.FC<ExcelUploadProps> = ({ language }) => {
     setErrorMsg('');
     setSuccessCount(null);
     setFailedRecords([]);
+
+    // 1. Validate File Type
+    const fileExt = file.name.split('.').pop()?.toLowerCase();
+    if (fileExt !== 'xlsx' && fileExt !== 'xls') {
+      setErrorMsg("Invalid file type. Only Excel files (.xlsx, .xls) are allowed.");
+      setLoading(false);
+      return;
+    }
+
+    // 2. Validate File Size (Max 5MB)
+    if (file.size > 5 * 1024 * 1024) {
+      setErrorMsg("File size exceeds the 5MB limit. Please upload a smaller file.");
+      setLoading(false);
+      return;
+    }
     
     setUploadStep('Reading spreadsheet file...');
     setProgressPercent(15);
@@ -84,6 +99,34 @@ export const ExcelUpload: React.FC<ExcelUploadProps> = ({ language }) => {
           throw new Error(`Missing required columns: ${missingFields.join(', ')}. Please use the template.`);
         }
 
+        // 3. Validate duplicate Roll Number + Subject in the spreadsheet
+        const uniqueKeys = new Set<string>();
+        const studentNamesByRoll: { [roll: string]: string } = {};
+
+        for (let i = 0; i < rawJson.length; i++) {
+          const row = rawJson[i];
+          const roll = String(row["Roll Number"] || '').trim();
+          const name = String(row["Student Name"] || '').trim();
+          const sub = String(row["Subject"] || '').trim();
+
+          if (!roll || !name || !sub) {
+            throw new Error(`Row ${i + 2}: Roll Number, Student Name, and Subject must not be blank.`);
+          }
+
+          // Check duplicate Roll + Subject
+          const key = `${roll}-${sub}`;
+          if (uniqueKeys.has(key)) {
+            throw new Error(`Row ${i + 2}: Duplicate entry found in spreadsheet for Roll Number "${roll}" and Subject "${sub}".`);
+          }
+          uniqueKeys.add(key);
+
+          // Check duplicate Roll to different Name mapping
+          if (studentNamesByRoll[roll] && studentNamesByRoll[roll].toLowerCase() !== name.toLowerCase()) {
+            throw new Error(`Row ${i + 2}: Roll Number "${roll}" is assigned to different names in this sheet: "${studentNamesByRoll[roll]}" and "${name}".`);
+          }
+          studentNamesByRoll[roll] = name;
+        }
+
         setUploadStep('Saving records to database...');
         setProgressPercent(90);
         await new Promise(resolve => setTimeout(resolve, 400));
@@ -95,7 +138,7 @@ export const ExcelUpload: React.FC<ExcelUploadProps> = ({ language }) => {
           const subjectName = String(row["Subject"] || '').trim();
 
           const parseMarkValue = (val: any, max: number, name: string) => {
-            if (val === undefined || val === null || String(val).trim() === '') return undefined;
+            if (val === undefined || val === null || String(val).trim() === '') return null;
             const num = Number(val);
             if (isNaN(num) || num < 0 || num > max) {
               throw new Error(`Row ${index + 2}: ${name} mark "${val}" must be a number between 0 and ${max}.`);

@@ -54,39 +54,8 @@ export const PublicResultPortal: React.FC<PublicResultPortalProps> = ({ language
         const data = await dbService.getSchoolSettings();
         setSchool(data);
 
-        const studList = await dbService.getStudents();
-        const markList = await dbService.getAllMarks();
-        
-        const studentsCount = studList.length || 6;
-        const classesCount = Array.from(new Set(studList.map(s => s.class))).length || 2;
-        const publishedCount = Array.from(new Set(markList.map(m => m.student_id))).length || 3;
-        
-        let totalObt = 0;
-        let totalMax = 0;
-        studList.forEach(s => {
-          const studentMarks = markList.filter(m => m.student_id === s.id);
-          studentMarks.forEach(m => {
-            let sObt = 0;
-            let sMax = 0;
-            if (m.fa1 != null) { sObt += m.fa1; sMax += 50; }
-            if (m.fa2 != null) { sObt += m.fa2; sMax += 50; }
-            if (m.fa3 != null) { sObt += m.fa3; sMax += 50; }
-            if (m.fa4 != null) { sObt += m.fa4; sMax += 50; }
-            if (m.sa1 != null) { sObt += m.sa1; sMax += 100; }
-            if (m.sa2 != null) { sObt += m.sa2; sMax += 100; }
-            totalObt += sObt;
-            totalMax += sMax;
-          });
-        });
-        
-        const avgPercent = totalMax === 0 ? 80 : Math.round((totalObt / totalMax) * 100);
-
-        setStats({
-          studentsCount,
-          classesCount,
-          publishedCount,
-          avgPercent
-        });
+        const statsData = await dbService.getPortalStats();
+        setStats(statsData);
       } catch (err) {
         console.error(err);
       }

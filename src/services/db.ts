@@ -287,12 +287,68 @@ if (!isSupabaseConfigured) {
 // ----------------------------------------------------
 
 export const dbService = {
+  // Audit Logger
+  async addAuditLog(action: string): Promise<void> {
+    if (isSupabaseConfigured && supabase) {
+      const { data: { user } } = await supabase.auth.getUser();
+      const userId = user ? user.id : 'anonymous';
+      await supabase.from('audit_logs').insert([{ user_id: userId, action }]);
+    } else {
+      const logs = JSON.parse(localStorage.getItem('zphs_audit_logs') || '[]');
+      logs.push({
+        id: 'log-' + Math.random().toString(36).substr(2, 9),
+        user_id: 'local-user',
+        action,
+        created_at: new Date().toISOString()
+      });
+      localStorage.setItem('zphs_audit_logs', JSON.stringify(logs));
+    }
+  },
+
+  // Portal stats aggregate via secure RPC
+  async getPortalStats(): Promise<{ studentsCount: number; classesCount: number; publishedCount: number; avgPercent: number }> {
+    if (isSupabaseConfigured && supabase) {
+      const { data, error } = await supabase.rpc('get_portal_stats');
+      if (error) {
+        console.error("Failed to fetch portal stats:", error.message);
+        return { studentsCount: 0, classesCount: 0, publishedCount: 0, avgPercent: 0 };
+      }
+      return data;
+    } else {
+      const studList = await this.getStudents();
+      const markList = await this.getAllMarks();
+      const studentsCount = studList.length || 6;
+      const classesCount = Array.from(new Set(studList.map(s => s.class))).length || 2;
+      const publishedCount = Array.from(new Set(markList.map(m => m.student_id))).length || 3;
+      
+      let totalObt = 0;
+      let totalMax = 0;
+      studList.forEach(s => {
+        const studentMarks = markList.filter(m => m.student_id === s.id);
+        studentMarks.forEach(m => {
+          let sObt = 0;
+          let sMax = 0;
+          if (m.fa1 != null) { sObt += m.fa1; sMax += 50; }
+          if (m.fa2 != null) { sObt += m.fa2; sMax += 50; }
+          if (m.fa3 != null) { sObt += m.fa3; sMax += 50; }
+          if (m.fa4 != null) { sObt += m.fa4; sMax += 50; }
+          if (m.sa1 != null) { sObt += m.sa1; sMax += 100; }
+          if (m.sa2 != null) { sObt += m.sa2; sMax += 100; }
+          totalObt += sObt;
+          totalMax += sMax;
+        });
+      });
+      
+      const avgPercent = totalMax === 0 ? 80 : Math.round((totalObt / totalMax) * 100);
+      return { studentsCount, classesCount, publishedCount, avgPercent };
+    }
+  },
+
   // School Settings
   async getSchoolSettings(): Promise<School> {
     if (isSupabaseConfigured && supabase) {
       const { data, error } = await supabase.from('schools').select('*').limit(1).single();
       if (!error && data) return data;
-      // If error or empty, return default and insert
       return DEFAULT_SCHOOL;
     } else {
       return JSON.parse(localStorage.getItem('zphs_school') || JSON.stringify(DEFAULT_SCHOOL));
@@ -308,12 +364,14 @@ export const dbService = {
         .select()
         .single();
       if (error) throw error;
+      await this.addAuditLog(`Updated school settings: ${data.school_name}`);
       return data;
     } else {
       const current = await this.getSchoolSettings();
       const updated = { ...current, ...settings };
       localStorage.setItem('zphs_school', JSON.stringify(updated));
       await this.addActivity(`Updated school branding settings: ${updated.school_name}`);
+      await this.addAuditLog(`Updated school settings (local): ${updated.school_name}`);
       return updated;
     }
   },
@@ -331,23 +389,22 @@ export const dbService = {
         .eq('email', email)
         .single();
       
-      if (profileError || !teacher) {
-        // Return standard user if profile missing
-        return {
-          id: data.user.id,
-          email: data.user.email || email,
-          name: email.split('@')[0],
-          role: email.includes('admin') ? 'admin' : 'teacher'
-        };
-      }
-      return teacher;
+      const userObj: User = teacher || {
+        id: data.user.id,
+        email: data.user.email || email,
+        name: email.split('@')[0],
+        role: email.includes('admin') ? 'admin' : 'teacher'
+      };
+      
+      await this.addAuditLog(`Teacher login: ${email}`);
+      return userObj;
     } else {
-      // Local Storage login check
       const teachers: User[] = JSON.parse(localStorage.getItem('zphs_teachers') || '[]');
       const user = teachers.find(t => t.email.toLowerCase() === email.toLowerCase());
       
       if (user && password === 'password') {
         sessionStorage.setItem('zphs_current_user', JSON.stringify(user));
+        await this.addAuditLog(`Teacher login (local): ${email}`);
         return user;
       }
       throw new Error("Invalid email or password");
@@ -355,6 +412,10 @@ export const dbService = {
   },
 
   async logout(): Promise<void> {
+    const user = await this.getCurrentUser();
+    const email = user ? user.email : 'unknown';
+    await this.addAuditLog(`Teacher logout: ${email}`);
+    
     if (isSupabaseConfigured && supabase) {
       await supabase.auth.signOut();
     } else {
@@ -364,8 +425,9 @@ export const dbService = {
 
   async getCurrentUser(): Promise<User | null> {
     if (isSupabaseConfigured && supabase) {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) return null;
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session || !session.user) return null;
+      const user = session.user;
 
       const { data: teacher } = await supabase
         .from('teachers')
@@ -406,11 +468,11 @@ export const dbService = {
         .select()
         .single();
       if (error) throw error;
+      await this.addAuditLog(`Created student: ${data.student_name} (Roll: ${data.roll_number})`);
       return data;
     } else {
       const students = await this.getStudents();
       
-      // Check for duplicate roll number
       if (students.some(s => s.roll_number.toLowerCase() === student.roll_number.toLowerCase())) {
         throw new Error(`Roll number ${student.roll_number} already exists!`);
       }
@@ -423,6 +485,7 @@ export const dbService = {
       students.push(newStudent);
       localStorage.setItem('zphs_students', JSON.stringify(students));
       await this.addActivity(`Added student: ${newStudent.student_name} (Roll: ${newStudent.roll_number})`);
+      await this.addAuditLog(`Created student (local): ${newStudent.student_name} (Roll: ${newStudent.roll_number})`);
       return newStudent;
     }
   },
@@ -436,13 +499,13 @@ export const dbService = {
         .select()
         .single();
       if (error) throw error;
+      await this.addAuditLog(`Updated student: ${data.student_name} (Roll: ${data.roll_number})`);
       return data;
     } else {
       const students = await this.getStudents();
       const idx = students.findIndex(s => s.id === id);
       if (idx === -1) throw new Error("Student not found");
       
-      // Check roll number uniqueness if updated
       if (updates.roll_number && updates.roll_number !== students[idx].roll_number) {
         if (students.some(s => s.id !== id && s.roll_number.toLowerCase() === updates.roll_number?.toLowerCase())) {
           throw new Error(`Roll number ${updates.roll_number} already exists!`);
@@ -453,27 +516,32 @@ export const dbService = {
       students[idx] = updated;
       localStorage.setItem('zphs_students', JSON.stringify(students));
       await this.addActivity(`Updated student details: ${updated.student_name}`);
+      await this.addAuditLog(`Updated student (local): ${updated.student_name} (Roll: ${updated.roll_number})`);
       return updated;
     }
   },
 
   async deleteStudent(id: string): Promise<void> {
     if (isSupabaseConfigured && supabase) {
+      const { data: st } = await supabase.from('students').select('student_name, roll_number').eq('id', id).maybeSingle();
+      const name = st ? st.student_name : id;
+      const roll = st ? st.roll_number : '';
       const { error } = await supabase.from('students').delete().eq('id', id);
       if (error) throw error;
+      await this.addAuditLog(`Deleted student: ${name} (Roll: ${roll})`);
     } else {
       const students = await this.getStudents();
       const student = students.find(s => s.id === id);
       const filtered = students.filter(s => s.id !== id);
       localStorage.setItem('zphs_students', JSON.stringify(filtered));
 
-      // Cascade delete marks
       const marks = await this.getAllMarks();
       const filteredMarks = marks.filter(m => m.student_id !== id);
       localStorage.setItem('zphs_marks', JSON.stringify(filteredMarks));
 
       if (student) {
         await this.addActivity(`Deleted student: ${student.student_name}`);
+        await this.addAuditLog(`Deleted student (local): ${student.student_name} (Roll: ${student.roll_number})`);
       }
     }
   },
@@ -502,7 +570,6 @@ export const dbService = {
 
   async saveMarks(studentId: string, subjectId: string, marksData: Partial<Omit<Mark, 'id' | 'student_id' | 'subject_id' | 'updated_at'>>): Promise<Mark> {
     if (isSupabaseConfigured && supabase) {
-      // Check if marks record exists
       const { data: existing } = await supabase
         .from('marks')
         .select('id')
@@ -529,6 +596,11 @@ export const dbService = {
         if (error) throw error;
         result = data;
       }
+      
+      const { data: st } = await supabase.from('students').select('student_name, roll_number').eq('id', studentId).maybeSingle();
+      const { data: sub } = await supabase.from('subjects').select('subject_name').eq('id', subjectId).maybeSingle();
+      await this.addAuditLog(`Updated marks for student ${st?.student_name || studentId} (Roll: ${st?.roll_number || ''}) in subject ${sub?.subject_name || subjectId}`);
+      
       return result;
     } else {
       const marks = await this.getAllMarks();
@@ -560,13 +632,13 @@ export const dbService = {
 
       localStorage.setItem('zphs_marks', JSON.stringify(marks));
       
-      // Log activity
       const students = await this.getStudents();
       const student = students.find(s => s.id === studentId);
       const subjects = await this.getSubjects();
       const subject = subjects.find(s => s.id === subjectId);
       if (student && subject) {
         await this.addActivity(`Updated marks for ${student.student_name} in ${subject.subject_name}`);
+        await this.addAuditLog(`Updated marks (local) for student: ${student.student_name} (Roll: ${student.roll_number}) in subject ${subject.subject_name}`);
       }
 
       return updatedMark;
@@ -577,35 +649,28 @@ export const dbService = {
     let successCount = 0;
     const failures: string[] = [];
     
-    // Cache students and subjects for fast lookup
     const students = await this.getStudents();
     const subjects = await this.getSubjects();
     
     for (const entry of entries) {
       try {
-        // 1. Find or create student
         let student = students.find(s => s.roll_number.toLowerCase() === entry.rollNumber.toLowerCase());
         
         if (!student) {
-          // Auto create student
           student = await this.addStudent({
             roll_number: entry.rollNumber,
             student_name: entry.studentName,
-            father_name: "Parent", // placeholder
-            date_of_birth: "2011-01-01", // placeholder default
+            father_name: "Parent",
+            date_of_birth: "2011-01-01",
             class: entry.classVal,
             section: "A",
             phone: ""
           });
-          // Add to local cache list
           students.push(student);
         }
 
-        // 2. Find subject
         let subject = subjects.find(s => s.subject_name.toLowerCase() === entry.subjectName.toLowerCase());
         if (!subject) {
-          // If subject doesn't exist, we can add it or return error
-          // Let's auto-create subjects to be extremely robust!
           if (isSupabaseConfigured && supabase) {
             const { data, error } = await supabase
               .from('subjects')
@@ -632,7 +697,6 @@ export const dbService = {
           throw new Error(`Could not create subject: ${entry.subjectName}`);
         }
 
-        // 3. Save marks
         await this.saveMarks(student.id, subject.id, entry.marks);
         successCount++;
       } catch (err: any) {
@@ -642,6 +706,7 @@ export const dbService = {
 
     if (successCount > 0) {
       await this.addActivity(`Imported marks spreadsheet with ${successCount} entries`);
+      await this.addAuditLog(`Excel marks import: ${successCount} entries imported successfully`);
     }
 
     return {
@@ -650,63 +715,47 @@ export const dbService = {
     };
   },
 
-  // Student portal lookup
+  // Student portal lookup via secure RPC to protect student records privacy
   async findStudentWithMarks(rollNumber: string, dob: string): Promise<any | null> {
-    const students = await this.getStudents();
-    const student = students.find(
-      s => s.roll_number.toLowerCase() === rollNumber.toLowerCase() && s.date_of_birth === dob
-    );
-
-    if (!student) return null;
-
-    // Fetch marks
-    const allMarks = await this.getAllMarks();
-    const subjects = await this.getSubjects();
-
-    const studentMarksMap: { [subjectName: string]: any } = {};
-    
-    // Ensure all subjects are represented in the object
-    subjects.forEach(sub => {
-      studentMarksMap[sub.subject_name] = {
-        fa1: null,
-        fa2: null,
-        fa3: null,
-        fa4: null,
-        sa1: null,
-        sa2: null
-      };
-    });
-
-    const studentMarksList = allMarks.filter(m => m.student_id === student.id);
-    studentMarksList.forEach(m => {
-      const sub = subjects.find(s => s.id === m.subject_id);
-      if (sub) {
-        studentMarksMap[sub.subject_name] = {
-          fa1: m.fa1,
-          fa2: m.fa2,
-          fa3: m.fa3,
-          fa4: m.fa4,
-          sa1: m.sa1,
-          sa2: m.sa2
-        };
+    if (isSupabaseConfigured && supabase) {
+      const { data, error } = await supabase.rpc('get_student_result', {
+        roll_num: rollNumber,
+        dob_val: dob
+      });
+      if (error) {
+        console.error("RPC student lookup failed:", error.message);
+        return null;
       }
-    });
+      return data;
+    } else {
+      const students = await this.getStudents();
+      const student = students.find(
+        s => s.roll_number.toLowerCase() === rollNumber.toLowerCase() && s.date_of_birth === dob
+      );
 
-    // To compute rank, fetch all students in the same class
-    const classStudents = students.filter(s => s.class === student.class);
-    const classStudentsWithMarks: any[] = [];
+      if (!student) return null;
 
-    for (const cs of classStudents) {
-      const csMarksMap: { [subjectName: string]: any } = {};
+      const allMarks = await this.getAllMarks();
+      const subjects = await this.getSubjects();
+
+      const studentMarksMap: { [subjectName: string]: any } = {};
+      
       subjects.forEach(sub => {
-        csMarksMap[sub.subject_name] = { fa1: null, fa2: null, fa3: null, fa4: null, sa1: null, sa2: null };
+        studentMarksMap[sub.subject_name] = {
+          fa1: null,
+          fa2: null,
+          fa3: null,
+          fa4: null,
+          sa1: null,
+          sa2: null
+        };
       });
 
-      const csMarksList = allMarks.filter(m => m.student_id === cs.id);
-      csMarksList.forEach(m => {
+      const studentMarksList = allMarks.filter(m => m.student_id === student.id);
+      studentMarksList.forEach(m => {
         const sub = subjects.find(s => s.id === m.subject_id);
         if (sub) {
-          csMarksMap[sub.subject_name] = {
+          studentMarksMap[sub.subject_name] = {
             fa1: m.fa1,
             fa2: m.fa2,
             fa3: m.fa3,
@@ -717,38 +766,76 @@ export const dbService = {
         }
       });
 
-      classStudentsWithMarks.push({
-        studentId: cs.id,
-        studentName: cs.student_name,
-        rollNumber: cs.roll_number,
-        class: cs.class,
-        section: cs.section,
-        subjects: csMarksMap
-      });
+      const classStudents = students.filter(s => s.class === student.class);
+      const classStudentsWithMarks: any[] = [];
+
+      for (const cs of classStudents) {
+        const csMarksMap: { [subjectName: string]: any } = {};
+        subjects.forEach(sub => {
+          csMarksMap[sub.subject_name] = { fa1: null, fa2: null, fa3: null, fa4: null, sa1: null, sa2: null };
+        });
+
+        const csMarksList = allMarks.filter(m => m.student_id === cs.id);
+        csMarksList.forEach(m => {
+          const sub = subjects.find(s => s.id === m.subject_id);
+          if (sub) {
+            csMarksMap[sub.subject_name] = {
+              fa1: m.fa1,
+              fa2: m.fa2,
+              fa3: m.fa3,
+              fa4: m.fa4,
+              sa1: m.sa1,
+              sa2: m.sa2
+            };
+          }
+        });
+
+        classStudentsWithMarks.push({
+          studentId: cs.id,
+          studentName: cs.student_name,
+          rollNumber: cs.roll_number,
+          class: cs.class,
+          section: cs.section,
+          subjects: csMarksMap
+        });
+      }
+
+      const currentStudentWithMarks = {
+        studentId: student.id,
+        studentName: student.student_name,
+        rollNumber: student.roll_number,
+        class: student.class,
+        section: student.section,
+        subjects: studentMarksMap
+      };
+
+      return {
+        student,
+        subjectsMap: studentMarksMap,
+        classStudents: classStudentsWithMarks,
+        currentWithMarks: currentStudentWithMarks
+      };
     }
-
-    const currentStudentWithMarks = {
-      studentId: student.id,
-      studentName: student.student_name,
-      rollNumber: student.roll_number,
-      class: student.class,
-      section: student.section,
-      subjects: studentMarksMap
-    };
-
-    return {
-      student,
-      subjectsMap: studentMarksMap,
-      classStudents: classStudentsWithMarks,
-      currentWithMarks: currentStudentWithMarks
-    };
   },
 
   // Activities
   async getRecentActivities(): Promise<ActivityLog[]> {
     if (isSupabaseConfigured && supabase) {
-      // Can store activities in a DB table or return empty
-      return [];
+      // Fetch latest logs from audit_logs table
+      const { data, error } = await supabase
+        .from('audit_logs')
+        .select('*')
+        .order('created_at', { ascending: false })
+        .limit(10);
+      if (error) {
+        console.error("Failed to fetch audit logs:", error.message);
+        return [];
+      }
+      return (data || []).map(log => ({
+        id: log.id,
+        text: log.action,
+        timestamp: log.created_at
+      }));
     } else {
       const logs = JSON.parse(localStorage.getItem('zphs_activities') || '[]');
       return logs.sort((a: any, b: any) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()).slice(0, 10);
