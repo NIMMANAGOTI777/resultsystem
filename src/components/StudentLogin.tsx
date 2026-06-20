@@ -21,6 +21,7 @@ export const StudentLogin: React.FC<StudentLoginProps> = ({ language }) => {
     
     // Clean and validate admission number (must be 4 digits)
     const cleanAdmission = admissionNumber.trim();
+    console.log('StudentLogin: admission entered ->', cleanAdmission); // LOG 1
     if (!cleanAdmission) {
       setError(language === 'te' ? "దయచేసి అన్ని వివరాలను నమోదు చేయండి." : "Please fill in all fields.");
       return;
@@ -36,7 +37,9 @@ export const StudentLogin: React.FC<StudentLoginProps> = ({ language }) => {
 
     try {
       // Look up student in Supabase or local storage via admission number only
+      console.log('StudentLogin: calling dbService.findStudentByAdmission with', cleanAdmission); // LOG 2
       const studentData = await dbService.findStudentByAdmission(cleanAdmission);
+      console.log('StudentLogin: dbService returned', studentData); // LOG 3
       if (studentData) {
         // Save student profile in sessionStorage
         dbService.saveStudentSession({
@@ -56,7 +59,7 @@ export const StudentLogin: React.FC<StudentLoginProps> = ({ language }) => {
         );
       }
     } catch (err: any) {
-      console.error(err);
+      console.error('StudentLogin: error', err); // LOG 4
       setError(
         language === 'te'
           ? "ధృవీకరణ సమయంలో లోపం సంభవించింది. దయచేసి మళ్లీ ప్రయత్నించండి."
